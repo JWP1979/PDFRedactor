@@ -1,52 +1,51 @@
 import pdfplumber
 import pandas as pd
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+import fitz  # PyMuPDF
 
 # --- FILE PATHS ---
 PDF_PATH = "Statement_from_bank_accounts_27042020.pdf"
 EXCEL_PATH = "2020 Output.xlsx"
-OUTPUT_PDF_PATH = "Filtered_Statement_April2020.pdf"
+OUTPUT_PDF_PATH = "Redacted_Statement_April2020.pdf"
 
-# --- LOAD WITHDRAWALS FROM EXCEL ---
+# --- LOAD WITHDRAWALS FROM EXCEL (CLEANED) ---
 df = pd.read_excel(EXCEL_PATH)
 withdrawals_raw = df["Withdrawals (PLN)"].dropna().astype(str)
-withdrawals_cleaned = withdrawals_raw.str.replace(",", ".").str.strip()
-withdrawal_amounts = set(f"{float(val):.2f}" for val in withdrawals_cleaned)
 
-# --- SETUP OUTPUT PDF ---
-c = canvas.Canvas(OUTPUT_PDF_PATH, pagesize=A4)
-width, height = A4
-y_position = height - 50
-matched_rows = 0
+# Clean: remove PLN, replace comma with dot, trim spaces
+amounts = withdrawals_raw.str.replace("PLN", "", regex=False)\
+                         .str.replace(",", ".", regex=False)\
+                         .str.strip().astype(float)
 
-# --- OPEN PDF WITH pdfplumber ---
-with pdfplumber.open(PDF_PATH) as pdf:
-    for page in pdf.pages:
-        table = page.extract_table()
-        if not table:
-            continue
+amounts_set = set(f"{amt:.2f}" for amt in amounts)
 
-        for row in table:
-            if not row:
-                continue
+# --- OPEN PDF ---
+pdf = pdfplumber.open(PDF_PATH)
+original_doc = fitz.open(PDF_PATH)
+new_doc = fitz.open()  # Will hold the final redacted version
 
-            # Check if any cell contains a matching withdrawal
-            row_text = "   ".join(cell if cell else "" for cell in row)
-            if any(w in row_text.replace(",", ".") for w in withdrawal_amounts):
-                c.drawString(50, y_position, row_text)
-                y_position -= 15
-                matched_rows += 1
+for i, page in enumerate(pdf.pages):
+    text_lines = page.extract_text().split("\n")
+    original_page = original_doc[i]
+    new_page = new_doc.new_page(width=original_page.rect.width, height=original_page.rect.height)
 
-                if y_position < 50:
-                    c.showPage()
-                    y_position = height - 50
+    for line in text_lines:
+        line_clean = line.replace(",", "").strip()
+        is_match = any(f"{amount} PLN" in line_clean for amount in amounts_set)
 
-# Add message if nothing matched
-if matched_rows == 0:
-    c.drawString(50, height - 50, "⚠ No transactions matched the withdrawal list.")
+        if not is_match:  # Non-matching entries
+            # Redact the line (draw black rectangle over the area)
+            rect = original_page.search_for(line)
+            for r in rect:
+                new_page.draw_rect(r, color=(0, 0, 0), fill=(0, 0, 0))  # Black rectangle
+        else:
+            # Copy the matching line to the new PDF
+            new_page.insert_text((50, 50 + 12 * text_lines.index(line)), line, fontsize=9)
 
-# --- SAVE OUTPUT PDF ---
-c.save()
+pdf.close()
+original_doc.close()
 
-print(f"✅ Done. {matched_rows} matching rows written to: {OUTPUT_PDF_PATH}")
+# --- SAVE THE NEW PDF ---
+new_doc.save(OUTPUT_PDF_PATH)
+new_doc.close()
+
+print(f"✅ Done! Redacted PDF saved as: {OUTPUT_PDF_PATH}")
